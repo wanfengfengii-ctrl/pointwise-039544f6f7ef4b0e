@@ -1,0 +1,11 @@
+[
+  {"session_id":"demo","source_position":1,"event_id":"e1","top_id":"t","branch_id":"root","kind":"begin","payload":{}},
+  {"session_id":"demo","source_position":2,"event_id":"e2","top_id":"t","branch_id":"root","kind":"row","payload":{"table":"accounts","op":"insert","row":{"id":1,"value":10}}},
+  {"session_id":"demo","source_position":3,"event_id":"e3","top_id":"t","branch_id":"child","kind":"branch","payload":{},"parent_id":"root"},
+  {"session_id":"demo","source_position":4,"event_id":"e4","top_id":"t","branch_id":"child","kind":"row","payload":{"table":"accounts","op":"update","key":[1],"row":{"id":1,"value":20}}},
+  {"session_id":"demo","source_position":5,"event_id":"e5","top_id":"t","branch_id":"child","kind":"rollback","payload":{}},
+  {"session_id":"demo","source_position":6,"event_id":"e6","top_id":"t","branch_id":"root","kind":"commit","payload":{}},
+  {"session_id":"demo","source_position":7,"event_id":"e7","top_id":"other","branch_id":"root","kind":"begin","payload":{}},
+  {"session_id":"demo","source_position":8,"event_id":"e8","top_id":"other","branch_id":"root","kind":"row","payload":{"table":"accounts","op":"insert","row":{"id":2,"value":30}}},
+  {"session_id":"demo","source_position":9,"event_id":"e9","top_id":"other","branch_id":"root","kind":"commit","payload":{}}
+]
