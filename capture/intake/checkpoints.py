@@ -17,7 +17,8 @@ class CheckpointStore:
         accepted, confirmed = self.connection.execute(
             "SELECT accepted,confirmed FROM progress WHERE singleton=1").fetchone()
         unfinished = tuple(row[0] for row in self.connection.execute(
-            "SELECT top_id FROM tops WHERE state='active' ORDER BY top_id"))
+            "SELECT top_id FROM tops WHERE state='active' "
+            "UNION SELECT top_id FROM pending ORDER BY 1"))
         pending = accepted if accepted > confirmed else None
         return IntakeCheckpoint(accepted, confirmed, pending, unfinished)
 

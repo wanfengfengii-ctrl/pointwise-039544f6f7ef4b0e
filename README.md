@@ -10,8 +10,11 @@ python3.11 -B -m capture.intake.collector demo
 
 The demo uses a temporary archive, pauses after a child rollback, closes,
 reopens and completes two transactions. Before commit the archive is empty;
-after recovery it contains accounts 1=10 and 2=30 with two receipts.
-Tests create only their own temporary directories. No installation is needed.
+after recovery it contains accounts 1=10 and 2=30 with two receipts. It then
+runs a second archive through the late-object scenario of OBJECTS.md: a commit
+is accepted while its referenced object is still incomplete, waits durably
+across a reopen, and publishes once the last part arrives. Tests create only
+their own temporary directories. No installation is needed.
 
 ## Public API
 
@@ -123,6 +126,109 @@ against the publication-time archive. There is no sparse-image completion.
 Parent A=10, child A=20, rollback child, commit produces A=10. Child deletes
 and child key moves are similarly undone by replaying only surviving changes.
 
+## Late-arriving large fields
+
+OBJECTS.md extends the same envelope with root-branch object events and
+non-primary-key string references. The event format version stays 1; all V1
+interfaces, error types and tests are unchanged.
+
+New event kinds, always addressed to the root branch of an already begun top
+(non-root is TransactionRelationError; before begin, after abort or after
+publication is TransactionStateError):
+
+```json
+{"kind":"object_part","payload":{"object_id":"X","index":0,"data":"5Lit"}}
+{"kind":"object_seal","payload":{"object_id":"X","parts":2,"size":6,"sha256":"..."}}
+```
+
+An object identity is (session, top, object_id); objects never cross tops.
+`data` is canonical standard Base64 (no whitespace, URL alphabet, bad padding
+or nonzero padding bits; decoding and re-encoding must reproduce it). Parts
+may arrive out of order, before or after the seal, and may be empty; indexes
+concatenate from zero. A repeated part is accepted only with identical bytes,
+a repeated seal only with an identical (parts, size, sha256) declaration.
+Once a seal exists, part indexes must stay below `parts`, and a seal that
+arrives after parts checks their indexes. When every declared part is present
+the assembled bytes are checked immediately against `size` and `sha256` and
+must be strict UTF-8; a single character may be split across parts. All of
+these violations are EnvelopeError and reject the whole segment, even for
+objects that are unreferenced, withdrawn or overwritten.
+
+In insert/update rows, a non-primary-key str column (nullable or not) may
+hold exactly `{"$object":"X"}` instead of a string or an allowed null. Other
+dictionaries, empty object ids, non-str columns and primary-key references
+are RowValidationError. A reference denotes the final validated string of
+that object inside the same top transaction. Reads never return references,
+placeholders or partial content.
+
+### Waiting and publication states
+
+Commit freezes the top's rows and lineage. Afterwards only root-branch object
+events and exact replays are accepted for that top until it publishes; abort
+still produces no receipt and admits only replays. A commit whose final
+written rows reference incomplete objects is durably accepted into a waiting
+state instead of publishing: the `pending` table holds the commit order and
+`pending_refs` the object ids actually needed. Top states are therefore
+`active` → `committed` (waiting, persisted) → published, or `active` →
+`aborted`. `checkpoint().unfinished_top_ids` lists active plus waiting tops
+in sorted order; accepted/confirmed/pending_position keep their V1 meaning.
+Idle and end poll results never publish, complete or cancel waiting.
+
+Only references in the transaction's final written rows are waited for;
+references that were withdrawn, overwritten or deleted do not block, and the
+wait set is never the union of historical references. Publication happens in
+commit source_position order: after every newly accepted event the collector
+publishes the longest ready prefix of waiting commits. A ready successor
+never overtakes an incomplete predecessor, and a predecessor is not skipped
+because a successor overwrites its rows. One late part can release several
+old commits in a single feed. `FeedResult.completed_top_ids` lists the tops
+published by that feed in order; replays list nothing. Each publication
+interprets surviving operations against the real predecessor archive base and
+keeps the original commit event identity for its receipt.
+
+Row/rollback previews and commit revalidation interpret against a logical
+base: the physical archive plus the surviving operations of every waiting
+predecessor in commit order. Key occupancy is content independent, so
+unresolved references in that overlay are harmless; a successor can update or
+move a key that a waiting predecessor logically inserted. The overlay is
+never visible through `Archive.read` and does not imply the predecessor has a
+receipt. Uncommitted tops never enter the base.
+
+Rows, receipts, object acceptance, wait state and accepted_position remain
+one feed write unit: if a segment first releases old publications and then
+meets an illegal event or a hook failure, the whole segment rolls back.
+
+### Reclamation and evidence lifetimes
+
+Object content is intake staging, not archive result. Once the source has
+confirmed the part positions and no unpublished transaction can still need an
+object (its top is published or aborted, or committed and not referencing
+it), the next successful maintenance scrubs every persistent content copy:
+the object store content, part bytes, and the canonical event bytes of
+object_part identities in the permanent ledger. Raw segment payloads still
+follow the V1 rule (confirmed and unreferenced by unfinished tops, so a
+segment needed by a waiting top is retained whole). Published rows in the
+archive are results and are kept. Permanent metadata survives: event
+identity/position/kind, SHA-256 digests of canonical events, part digests and
+seal declarations serve as dedup and recovery evidence, so exact replay after
+reclamation is still idempotent while the same identity with changed content
+is still EventConflictError; reclaimed objects are never rebuilt and no new
+receipt appears. Content of objects that an active top might still reference,
+or that a waiting top's final rows do reference, is always retained.
+
+Recovery revalidates the accepted identity prefix (including scrubbed
+object_part entries by digest), object accepted facts and seals against the
+object tables, the unpublished journal and lineage, the pending commit order
+and wait sets, and the receipt prefix before allowing further confirmation.
+Inconsistent state is rejected with RecoveryConsistencyError; waiting and
+visible rows are restored exactly.
+
+`samples/objects.py` provides the public fixtures: `selfcheck` validates the
+materials only, `verify` runs the withdrawn and ordered scenarios event by
+event with independent reads, reopens and replays, and `demo` prints the
+phases. `tests/test_objects.py` adds an independent small-domain reference
+engine and the business regression for these rules.
+
 A segment must be internally consecutive. It can be wholly repeated, entirely
 new, or an already accepted prefix followed by a new suffix starting exactly
 at accepted_position+1. Same ID/position/content is a duplicate. Any content
@@ -177,12 +283,13 @@ nothing. Hooks must not reenter feed or close the collector.
 ## Code and regressions
 
 Source modules validate sessions, canonical envelopes, segments and replay.
-Transaction modules own identity, lineage, ordered journals and completion.
-Row modules own schemas, typed keys, operation interpretation, isolated
-workspaces and immutable net candidates. Archive modules own SQLite units,
-publication, receipts and snapshot queries. Intake owns the feed boundary,
-recovery cross-checks, checkpoints, acknowledgement ordering and payload
-retention. All 24 production modules participate in this path.
+Transaction modules own identity, lineage, ordered journals, completion,
+object acceptance and the durable pending queue. Row modules own schemas,
+typed keys, operation interpretation, isolated workspaces and immutable net
+candidates. Archive modules own SQLite units, publication, receipts and
+snapshot queries. Intake owns the feed boundary, recovery cross-checks,
+checkpoints, acknowledgement ordering, payload retention and the ordered
+ready-prefix publisher. All 27 production modules participate in this path.
 
 Tests/test_normal.py covers full-image CRUD, interleaving, key moves and
 conflicts, whole-segment validation and typed/compound-key reads.
@@ -194,6 +301,13 @@ all publication fault hooks, independent reader visibility, per-event reopen,
 lost acknowledgements, shared payload references, session/version guards,
 close/resume and idle/end. Tests/test_contract.py additionally checks malformed
 values, source/schema errors and corruption rejection before confirmation.
+Tests/test_objects.py covers the OBJECTS.md rules: overwritten, deleted and
+withdrawn references never wait, key occupancy against the logical base,
+object declarations and conflicts, zero-part objects, cross-part UTF-8,
+whole-segment rollback of triggered publications, interleaved commits released
+in commit order, reopen at every acceptance boundary, lost acknowledgement
+replies, reclamation gating and replay after reclamation, plus a generated
+interleaving checked against an independent small-domain reference engine.
 
 V1 has no network protocol adapters, schema evolution, snapshot backfill,
 multiworker takeover, distributed transactions or historical row queries.

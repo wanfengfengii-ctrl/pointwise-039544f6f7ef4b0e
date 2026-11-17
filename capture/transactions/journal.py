@@ -31,7 +31,8 @@ class TransactionJournal:
 
     def unfinished_top_ids(self):
         return tuple(row[0] for row in self.connection.execute(
-            "SELECT top_id FROM tops WHERE state='active' ORDER BY top_id"))
+            "SELECT top_id FROM tops WHERE state='active' "
+            "UNION SELECT top_id FROM pending ORDER BY 1"))
 
     def payload_references(self, payload_id=None):
         if payload_id is None:
@@ -41,7 +42,7 @@ class TransactionJournal:
             "SELECT DISTINCT top_id FROM journal WHERE payload_id=? ORDER BY top_id",
             (payload_id,)))
 
-    def finish(self, top_id, state, completion_id):
+    def conclude(self, top_id, state, completion_id):
         if state not in ("committed", "aborted"):
             raise ValueError("invalid terminal state")
         changed = self.connection.execute(
@@ -49,4 +50,10 @@ class TransactionJournal:
             (state, completion_id, top_id)).rowcount
         if changed != 1:
             raise ValueError("transaction is not active")
+
+    def release(self, top_id):
         self.connection.execute("DELETE FROM journal WHERE top_id=?", (top_id,))
+
+    def finish(self, top_id, state, completion_id):
+        self.conclude(top_id, state, completion_id)
+        self.release(top_id)

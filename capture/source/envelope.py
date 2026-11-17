@@ -6,7 +6,9 @@ class EnvelopeError(ValueError):
     pass
 
 
-KINDS = frozenset(("begin", "branch", "row", "seal", "rollback", "commit", "abort"))
+KINDS = frozenset(("begin", "branch", "row", "seal", "rollback", "commit", "abort",
+                   "object_part", "object_seal"))
+PAYLOAD_KINDS = frozenset(("row", "object_part", "object_seal"))
 FIELDS = frozenset(("session_id", "source_position", "event_id", "top_id",
                     "branch_id", "kind", "payload"))
 
@@ -46,7 +48,7 @@ def validate_event_fields(value):
         raise EnvelopeError("source_position must be positive integer")
     if type(value["payload"]) is not dict:
         raise EnvelopeError("payload must be object")
-    if kind != "row" and value["payload"]:
+    if kind not in PAYLOAD_KINDS and value["payload"]:
         raise EnvelopeError("control payload must be empty")
     if kind == "branch" and (type(value["parent_id"]) is not str or
                              not value["parent_id"]):

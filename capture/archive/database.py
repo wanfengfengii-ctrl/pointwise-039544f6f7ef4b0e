@@ -15,13 +15,17 @@ class StorageVersionError(ValueError):
 _DDL = (
     "CREATE TABLE metadata(name TEXT PRIMARY KEY,value BLOB NOT NULL)",
     "CREATE TABLE progress(singleton INTEGER PRIMARY KEY CHECK(singleton=1),accepted INTEGER NOT NULL,confirmed INTEGER NOT NULL,publication INTEGER NOT NULL)",
-    "CREATE TABLE identities(event_id TEXT PRIMARY KEY,position INTEGER NOT NULL UNIQUE,canonical BLOB NOT NULL)",
+    "CREATE TABLE identities(event_id TEXT PRIMARY KEY,position INTEGER NOT NULL UNIQUE,canonical BLOB,digest TEXT NOT NULL,session_id TEXT NOT NULL,top_id TEXT NOT NULL,branch_id TEXT NOT NULL,kind TEXT NOT NULL,object_id TEXT,object_index INTEGER)",
     "CREATE TABLE tops(top_id TEXT PRIMARY KEY,root_id TEXT NOT NULL,state TEXT NOT NULL,completion_id TEXT)",
     "CREATE TABLE branches(top_id TEXT NOT NULL,branch_id TEXT NOT NULL,parent_id TEXT,state TEXT NOT NULL,PRIMARY KEY(top_id,branch_id),FOREIGN KEY(top_id) REFERENCES tops(top_id))",
     "CREATE TABLE payloads(payload_id INTEGER PRIMARY KEY,last_position INTEGER NOT NULL,body BLOB NOT NULL)",
     "CREATE TABLE journal(position INTEGER PRIMARY KEY,top_id TEXT NOT NULL,branch_id TEXT NOT NULL,payload_id INTEGER NOT NULL,event_index INTEGER NOT NULL,FOREIGN KEY(top_id) REFERENCES tops(top_id),FOREIGN KEY(payload_id) REFERENCES payloads(payload_id))",
     "CREATE INDEX journal_top ON journal(top_id,position)",
     "CREATE INDEX journal_payload ON journal(payload_id)",
+    "CREATE TABLE objects(top_id TEXT NOT NULL,object_id TEXT NOT NULL,parts INTEGER,size INTEGER,sha256 TEXT,content BLOB,complete INTEGER NOT NULL,reclaimed INTEGER NOT NULL,PRIMARY KEY(top_id,object_id))",
+    "CREATE TABLE object_parts(top_id TEXT NOT NULL,object_id TEXT NOT NULL,idx INTEGER NOT NULL,data BLOB,digest TEXT NOT NULL,PRIMARY KEY(top_id,object_id,idx))",
+    "CREATE TABLE pending(top_id TEXT PRIMARY KEY,commit_position INTEGER NOT NULL UNIQUE,completion_digest TEXT NOT NULL)",
+    "CREATE TABLE pending_refs(top_id TEXT NOT NULL,object_id TEXT NOT NULL,PRIMARY KEY(top_id,object_id))",
     "CREATE TABLE archive_rows(table_name TEXT NOT NULL,key_data TEXT NOT NULL,row_data BLOB NOT NULL,PRIMARY KEY(table_name,key_data))",
     "CREATE TABLE receipts(top_id TEXT PRIMARY KEY,session_id TEXT NOT NULL,event_id TEXT NOT NULL UNIQUE,digest TEXT NOT NULL,publication INTEGER NOT NULL UNIQUE)"
 )

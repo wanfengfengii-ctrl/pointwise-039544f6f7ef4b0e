@@ -39,6 +39,10 @@ def parse_row_operation(event, catalog):
                         canonical_bytes(row) if row is not None else None)
 
 
+def row_object_references(row):
+    return {value["$object"] for value in row.values() if type(value) is dict}
+
+
 def apply_row_operation(operation, catalog, rows):
     schema = catalog.require_table(operation.table)
     occupancy = KeyOccupancy(rows[operation.table])

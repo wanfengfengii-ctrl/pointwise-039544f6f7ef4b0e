@@ -7,15 +7,17 @@ from capture.source.segments import parse_segment, split_accepted_prefix
 from capture.source.replay import ReplaySource, load_replay_events
 from capture.transactions.assembly import TransactionAssembly
 from capture.transactions.identity import EventConflictError
+from capture.transactions.objects import parse_object_event
 from capture.rows.schema import SchemaCatalog
 from capture.rows.operations import parse_row_operation
-from capture.rows.workspace import RowWorkspace
+from capture.rows.workspace import RowWorkspace, candidate_object_references
 from capture.archive.database import ArchiveDatabase
-from capture.archive.publication import Publisher, PublicationHooks
+from capture.archive.publication import PublicationHooks
 from capture.archive.query import Archive
 from capture.intake.checkpoints import CheckpointStore
 from capture.intake.acknowledgements import AcknowledgementCoordinator
 from capture.intake.retention import PayloadStore, RetentionManager
+from capture.intake.pending import logical_base_rows, publish_ready
 from capture.intake.recovery import restore_intake
 
 
@@ -59,6 +61,8 @@ class Collector:
                     raise EventConflictError("event belongs to another source session")
                 if event.kind == "row":
                     parse_row_operation(event, self.catalog)
+                elif event.kind in ("object_part", "object_seal"):
+                    parse_object_event(event)
             completed = []
             with self.database.write_unit() as connection:
                 assembly = TransactionAssembly(connection)
@@ -73,18 +77,25 @@ class Collector:
                 if suffix:
                     payload_id = PayloadStore(connection).stage(parsed)
                     workspace = RowWorkspace(self.catalog)
-                    publisher = Publisher(connection, self.catalog, self.session.session_id, self.hooks)
                     for index, event in enumerate(parsed.events):
                         if event.source_position <= accepted:
                             continue
                         decision = assembly.accept(event, payload_id, index)
                         if decision.action == "commit":
-                            rows = workspace.materialize(decision.candidate, connection)
-                            publisher.publish(decision.candidate, rows)
-                            assembly.journal.finish(event.top_id, "committed", event.event_id)
-                            completed.append(event.top_id)
+                            base = logical_base_rows(connection, self.catalog)
+                            workspace.materialize(decision.candidate, connection, base=base)
+                            references = candidate_object_references(
+                                decision.candidate, self.catalog)
+                            assembly.conclude_commit(event, decision.candidate, references)
+                            completed.extend(publish_ready(
+                                connection, self.catalog, self.session.session_id, self.hooks))
+                        elif event.kind in ("object_part", "object_seal"):
+                            completed.extend(publish_ready(
+                                connection, self.catalog, self.session.session_id, self.hooks))
                         elif event.kind in ("row", "rollback"):
-                            workspace.materialize(assembly.preview(event.top_id), connection)
+                            base = logical_base_rows(connection, self.catalog)
+                            workspace.materialize(
+                                assembly.preview(event.top_id), connection, base=base)
                     CheckpointStore(connection).advance_accepted(parsed.last_position)
                     self.hooks.hit("before_commit")
             self.acknowledgements.flush_pending()
@@ -191,6 +202,32 @@ def main(argv=None):
             print("checkpoint:", collector.checkpoint())
             print("receipts:", collector.database.connection.execute(
                 "SELECT top_id,publication FROM receipts ORDER BY publication").fetchall())
+    # Late-arriving large fields: the parent references X, a child rewrites the
+    # reference to Y and is withdrawn, the commit waits for the last part of X
+    # and publishes even though Y never receives any content.
+    from samples.objects import make_case, session as object_session
+    case = make_case("withdrawn")
+    object_events = case["events"]
+    with tempfile.TemporaryDirectory(prefix="capture-objects-demo-") as directory:
+        path = Path(directory) / "archive.sqlite"
+        with open(path, ReplaySource(object_session(), object_events)) as collector:
+            for event in object_events[:8]:
+                collector.feed({"events": [event]})
+            print("objects: parent referenced X, child rewrote to Y and was withdrawn;")
+            print("objects: commit accepted, waiting for the last part of X:",
+                  "rows:", collector.archive.read("documents"),
+                  "unfinished:", collector.checkpoint().unfinished_top_ids,
+                  "receipts:", collector.database.connection.execute(
+                      "SELECT top_id,publication FROM receipts ORDER BY publication").fetchall())
+            collector.close()
+        with open(path, ReplaySource(object_session(), object_events)) as collector:
+            print("objects: reopened still waiting:", collector.checkpoint().unfinished_top_ids)
+            result = collector.feed({"events": [object_events[8]]})
+            print("objects: last part of X arrived (Y never completes):",
+                  "published:", result.completed_top_ids,
+                  "rows:", collector.archive.read("documents"),
+                  "receipts:", collector.database.connection.execute(
+                      "SELECT top_id,publication FROM receipts ORDER BY publication").fetchall())
     return 0
 
 

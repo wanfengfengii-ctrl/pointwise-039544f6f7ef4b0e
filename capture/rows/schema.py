@@ -67,10 +67,16 @@ class SchemaCatalog:
         schema = self.require_table(table)
         if type(row) is not dict or set(row) != {c[0] for c in schema.columns}:
             raise RowValidationError("full row must contain exactly the declared columns")
+        primary = set(schema.primary_key)
         for name, kind, nullable in schema.columns:
             value = row[name]
             if value is None and nullable:
                 continue
+            if type(value) is dict:
+                if (kind == "str" and name not in primary and set(value) == {"$object"} and
+                        type(value["$object"]) is str and value["$object"]):
+                    continue
+                raise RowValidationError("invalid object reference: " + name)
             if type(value) is not _TYPES[kind]:
                 raise RowValidationError("wrong value type: " + name)
             if kind == "float" and not isfinite(value):
